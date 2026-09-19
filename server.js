@@ -4,52 +4,68 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-app.get('/', (req,res)=> res.send('BLS ALG1 OK - Alger'));
+const BOT_TOKEN = "8980582367:AAFpAf6voJtT9BxMpLcK5Gg98AE0B0B8Pr0";
+let CHAT_ID = null; // auto-détecté
 
-app.get('/api/slots', async (req,res)=>{
+async function getChatId() {
+  if(CHAT_ID) return CHAT_ID;
   try {
-    // Nouvelle plateforme BLS - on check la page principale + la page RDV
+    const r = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates`);
+    const updates = r.data.result;
+    if(updates.length > 0){
+      CHAT_ID = updates[updates.length-1].message.chat.id;
+      console.log("CHAT_ID trouvé:", CHAT_ID);
+      return CHAT_ID;
+    }
+  } catch(e){ console.log("getChatId error", e.message); }
+  return null;
+}
+
+async function sendTelegram(text) {
+  const chatId = await getChatId();
+  if(!chatId) { console.log("Pas de Chat ID, envoie /start à @Blsalg1bot"); return; }
+  try {
+    await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      params: { chat_id: chatId, text, parse_mode: 'HTML' }
+    });
+    console.log("Telegram envoyé à", chatId);
+  } catch(e){ console.log("Telegram error", e.message); }
+}
+
+async function checkBLS() {
+  try {
     const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml',
-      'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0',
+      'Accept': 'text/html',
       'Referer': 'https://algeria.blsspainvisa.com/'
     };
+    const r = await axios.get('https://algeria.blsspainvisa.com/', { headers, timeout: 15000 });
+    const html = r.data.toLowerCase();
+    const isOpen = html.includes('book appointment') && !html.includes('no slots');
     
-    // Test 1: site principal
-    const main = await axios.get('https://algeria.blsspainvisa.com/', { headers, timeout: 15000 });
+    console.log("Check BLS:", isOpen ? "DISPONIBLE !" : "no_slots");
     
-    // Test 2: page appointment (nouveau système)
-    let appointmentPage = null;
-    try {
-      const appt = await axios.get('https://algeria.blsspainvisa.com/algeriaAlger/appointment', { headers, timeout: 15000 });
-      appointmentPage = appt.data.substring(0,500);
-    } catch(e) {
-      // Si 404 c'est normal, nouveau système bloque le scraping
-      appointmentPage = "new_system_active";
+    if(isOpen){
+      await sendTelegram(`🚨 <b>RDV BLS ALG1 ALGER DISPONIBLE !</b>\n\nVa vite:\nhttps://algeria.blsspainvisa.com/\n\nChecker: https://bls-alg1-alger.onrender.com/api/slots`);
+      return { status: "available" };
     }
-
-    // Pour l'instant BLS bloque tout en ALG1, donc on retourne no_slots
-    // Quand un créneau s'ouvre, le texte change et on détectera "Book Appointment"
-    const isAvailable = main.data.toLowerCase().includes('book appointment') || main.data.toLowerCase().includes('prendre rendez-vous');
-    
-    res.json({
-      status: "no_slots",
-      checkedAt: new Date().toISOString(),
-      blsStatus: main.status,
-      note: "Nouveau système BLS détecté - surveillance active",
-      available: false
-    });
-
-  } catch (err) {
-    // Même en erreur 404/403 on ne renvoie plus "error", on renvoie no_slots pour éviter de casser Render
-    res.json({
-      status: "no_slots",
-      checkedAt: new Date().toISOString(),
-      errorDetail: err.message,
-      note: "BLS injoignable momentanément - retry auto"
-    });
+    return { status: "no_slots" };
+  } catch(e){
+    return { status: "no_slots", error: e.message };
   }
+}
+
+setInterval(checkBLS, 2 * 60 * 1000); // toutes les 2 min
+checkBLS();
+
+app.get('/', (req,res)=> res.send('BLS ALG1 OK - Bot @Blsalg1bot actif - Envoie /start au bot'));
+app.get('/api/slots', async (req,res)=>{
+  const result = await checkBLS();
+  res.json({ ...result, checkedAt: new Date().toISOString() });
+});
+app.get('/api/test-telegram', async (req,res)=>{
+  await sendTelegram('✅ <b>Test OK</b> - Ton bot BLS ALG1 @Blsalg1bot marche !\n\nTu recevras une alerte dès qu un RDV s ouvre à Alger.\n\nChecker: https://bls-alg1-alger.onrender.com/api/slots');
+  res.json({ sent: true, chatId: CHAT_ID || "en attente - envoie /start à @Blsalg1bot" });
 });
 
 const PORT = process.env.PORT || 10000;
