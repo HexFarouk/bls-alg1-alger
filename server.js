@@ -5,43 +5,39 @@ const puppeteer = require('puppeteer');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// TES INFOS - NE PAS CHANGER
-const TELEGRAM_TOKEN = '8980582367:AAFCx7yWZ1W4D0V6rSA6pT1D8eJ9kL0mN1pQ';
-const CHAT_ID = '2066658213';
+// Mets tes infos dans Render > Environment, pas en dur
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || 'TON_TOKEN_ICI';
+const CHAT_ID = process.env.CHAT_ID || 'TON_CHAT_ID_ICI';
 const BLS_URL = 'https://algeria.blsspainvisa.com/';
 
 let lastStatus = 'init';
 let browser = null;
 
+function isPeakTime() {
+    const now = new Date();
+    // Alger = UTC+1, sans heure d'été
+    const algiersHour = now.getUTCHours() + 1;
+    const day = now.getUTCDay(); // 2 = Mardi, 5 = Vendredi
+    if (day === 2 && algiersHour >= 16 && algiersHour <= 19) return true;
+    if (day === 5 && algiersHour >= 15 && algiersHour <= 18) return true;
+    return false;
+}
+
 async function getBrowser() {
     if (browser) return browser;
     browser = await puppeteer.launch({
         headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
-        ]
+        args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--single-process','--disable-gpu','--no-zygote']
     });
     return browser;
 }
 
-async function sendTelegram(message) {
+async function sendTelegram(msg) {
     try {
         await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-            chat_id: CHAT_ID,
-            text: message,
-            parse_mode: 'Markdown'
+            chat_id: CHAT_ID, text: msg, parse_mode: 'Markdown'
         });
-        console.log('Telegram envoyé');
-    } catch (e) {
-        console.log('Erreur Telegram', e.message);
-    }
+    } catch(e) { console.log('Telegram error', e.message); }
 }
 
 async function checkBLS() {
@@ -49,36 +45,34 @@ async function checkBLS() {
     try {
         const b = await getBrowser();
         page = await b.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.goto(BLS_URL, { waitUntil: 'networkidle2', timeout: 60000 });
         
-        // Attend que le calendrier charge (nouvelle interface)
-        await page.waitForTimeout(5000);
-        
-        const content = await page.content();
-        const lower = content.toLowerCase();
-        
-        // NOUVELLE LOGIQUE V3 - basée sur ta photo
-        const hasNoSlots = lower.includes('no appointment') || 
-                          lower.includes('no slots') || 
-                          lower.includes('aucun créneau') || 
-                          lower.includes('pas de créneau') ||
-                          lower.includes('non disponible') ||
-                          lower.includes('no availability');
-        
-        const hasHighAvail = lower.includes('haute disponibilité') || 
-                            lower.includes('disponibilité limitée') || 
-                            lower.includes('créneaux disponibles') ||
-                            lower.includes('presque complet');
+        // V5 : on bloque tout le lourd pour passer la charge
+        await page.setRequestInterception(true);
+        page.on('request', req => {
+            const t = req.resourceType();
+            if (['image','stylesheet','font','media'].includes(t)) req.abort();
+            else req.continue();
+        });
 
-        const hasTimeSlots = lower.includes('8:30 am') || lower.includes('10:00 am') || lower.includes('heure de pointe');
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+        await page.goto(BLS_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
+        await page.waitForTimeout(8000);
 
-        console.log(`[${new Date().toISOString()}] Check: hasHighAvail=${hasHighAvail} hasTimeSlots=${hasTimeSlots} hasNoSlots=${hasNoSlots}`);
+        const html = await page.content();
+        const lower = html.toLowerCase();
 
-        // Si on voit des créneaux dispo et pas de message "aucun créneau"
-        if ((hasHighAvail || hasTimeSlots) && !hasNoSlots) {
+        // V5 : détection de TA capture
+        const hasNoSlots = lower.includes('aucun créneau') || lower.includes('non disponible') || lower.includes('no appointment');
+        const hasAvail = lower.includes('haute disponibilité') || lower.includes('disponibilité limitée') || lower.includes('créneaux disponibles');
+        const hasHours = lower.includes('8:30 am') || lower.includes('heure de pointe') || lower.includes('10:00 am');
+
+        console.log(`[CHECK] peak=${isPeakTime()} avail=${hasAvail} hours=${hasHours} noSlot=${hasNoSlots}`);
+
+        if (page) await page.close();
+
+        if ((hasAvail || hasHours) && !hasNoSlots) {
             if (lastStatus !== 'available') {
-                await sendTelegram(`🚨 *CRENEAU BLS ALGER 1 DISPO !* 🚨\n\nCalendrier vert/jaune détecté comme sur ta photo !\n\nClique VITE : ${BLS_URL}\n\nNe remplis rien, clique direct sur la date verte !`);
+                await sendTelegram(`🚨 *BLS ALGER DISPO !* 🚨\n\nCalendrier vert/jaune détecté comme sur ta photo.\n\nOuvre vite et clique toi-même sur la date :\n${BLS_URL}\n\nCréneau: Mardi 17h / Vendredi 16h`);
                 lastStatus = 'available';
             }
             return 'available';
@@ -86,33 +80,15 @@ async function checkBLS() {
             lastStatus = 'full';
             return 'full';
         }
-
-    } catch (e) {
-        console.log('Erreur check:', e.message);
-        // Si le browser crash, on le reset
-        if (browser) {
-            try { await browser.close(); } catch {}
-            browser = null;
-        }
+    } catch(e) {
+        console.log('Check error', e.message);
+        if (page) try{ await page.close(); }catch{}
+        if (browser) { try{ await browser.close(); }catch{} browser = null; }
         return 'error';
-    } finally {
-        if (page) try { await page.close(); } catch {}
     }
 }
 
-// Lance le check toutes les 3 minutes
-setInterval(checkBLS, 3 * 60 * 1000);
-checkBLS(); // premier check au démarrage
-
-app.get('/', (req, res) => res.send(`BLS V3 Running - Status: ${lastStatus} - ${new Date().toISOString()}`));
-app.get('/health', (req, res) => res.send('OK'));
-app.get('/api/test-telegram', async (req, res) => {
-    await sendTelegram('✅ Test V3 OK - Bot nouvelle interface opérationnel pour ALG1');
-    res.send('Test envoyé');
-});
-app.get('/api/check-now', async (req, res) => {
-    const status = await checkBLS();
-    res.send(`Status: ${status}`);
-});
-
-app.listen(PORT, () => console.log(`V3 Running on ${PORT}`));
+// Boucle intelligente
+async function loop() {
+    await checkBLS();
+    const delay = isPeakTime() ? 45 *
