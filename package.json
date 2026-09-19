@@ -1,13 +1,14 @@
 {
-  "name": "bls-alg1-touristique",
+  "name": "bls-alg1-alger",
   "version": "1.0.0",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "express": "^4.18.2",
     "axios": "^1.6.0",
-    "axios-cookiejar-support": "^5.0.0",
-    "tough-cookie": "^4.1.3",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "puppeteer": "^21.6.1"
   }
 }
