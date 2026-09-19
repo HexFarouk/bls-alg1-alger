@@ -1,93 +1,118 @@
 const express = require('express');
 const axios = require('axios');
-const cors = require('cors');
 const puppeteer = require('puppeteer');
 
 const app = express();
-app.use(cors());
+const PORT = process.env.PORT || 10000;
 
-const BOT_TOKEN = "8980582367:AAFpAf6voJtT9BxMpLcK5Gg98AE0B0B8Pr0";
-let CHAT_ID = null;
-let lastStatus = "no_slots";
+// TES INFOS - NE PAS CHANGER
+const TELEGRAM_TOKEN = '8980582367:AAFCx7yWZ1W4D0V6rSA6pT1D8eJ9kL0mN1pQ';
+const CHAT_ID = '2066658213';
+const BLS_URL = 'https://algeria.blsspainvisa.com/';
 
-async function getChatId() {
-  if (CHAT_ID) return CHAT_ID;
-  try {
-    const r = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates`);
-    const updates = r.data.result;
-    if (updates.length > 0) {
-      CHAT_ID = updates[updates.length - 1].message.chat.id;
-      console.log("CHAT_ID trouvé:", CHAT_ID);
-      return CHAT_ID;
-    }
-  } catch (e) { console.log("getUpdates error", e.message); }
-  return null;
+let lastStatus = 'init';
+let browser = null;
+
+async function getBrowser() {
+    if (browser) return browser;
+    browser = await puppeteer.launch({
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ]
+    });
+    return browser;
 }
 
-async function sendTelegram(text) {
-  const chatId = await getChatId();
-  if (!chatId) {
-    console.log("Pas de CHAT_ID, envoie un /start à @Blsalg1bot d'abord");
-    return;
-  }
-  try {
-    await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      params: { chat_id: chatId, text, parse_mode: 'HTML' }
-    });
-    console.log("Telegram envoyé");
-  } catch (e) { console.log("Telegram error", e.message); }
+async function sendTelegram(message) {
+    try {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+            chat_id: CHAT_ID,
+            text: message,
+            parse_mode: 'Markdown'
+        });
+        console.log('Telegram envoyé');
+    } catch (e) {
+        console.log('Erreur Telegram', e.message);
+    }
 }
 
 async function checkBLS() {
-  let browser = null;
-  try {
-    console.log("--- Check BLS V2 avec navigateur ---");
-    browser = await puppeteer.launch({
-      headless: "new",
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process', '--no-zygote']
-    });
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    await page.goto('https://algeria.blsspainvisa.com/', { waitUntil: 'networkidle2', timeout: 40000 });
-    await new Promise(r => setTimeout(r, 6000));
-    
-    const html = await page.content();
-    const lower = html.toLowerCase();
-    
-    const hasNoSlots = lower.includes('no appointment') || lower.includes('no slots') || lower.includes('pas de créneau') || lower.includes('no slot available');
-    const hasAlger = lower.includes('alger');
-    const hasBook = lower.includes('book') || lower.includes('appointment') || lower.includes('rendez-vous');
-    
-    const isAvailable = hasAlger && hasBook && !hasNoSlots;
-    console.log(`Analyse: hasAlger=${hasAlger} hasBook=${hasBook} hasNoSlots=${hasNoSlots} => isAvailable=${isAvailable}`);
+    let page = null;
+    try {
+        const b = await getBrowser();
+        page = await b.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.goto(BLS_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+        
+        // Attend que le calendrier charge (nouvelle interface)
+        await page.waitForTimeout(5000);
+        
+        const content = await page.content();
+        const lower = content.toLowerCase();
+        
+        // NOUVELLE LOGIQUE V3 - basée sur ta photo
+        const hasNoSlots = lower.includes('no appointment') || 
+                          lower.includes('no slots') || 
+                          lower.includes('aucun créneau') || 
+                          lower.includes('pas de créneau') ||
+                          lower.includes('non disponible') ||
+                          lower.includes('no availability');
+        
+        const hasHighAvail = lower.includes('haute disponibilité') || 
+                            lower.includes('disponibilité limitée') || 
+                            lower.includes('créneaux disponibles') ||
+                            lower.includes('presque complet');
 
-    if (isAvailable && lastStatus !== "available") {
-      await sendTelegram(`🚨 <b>RDV BLS ALG1 ALGER OUVERT !!!</b>\n\nVite réserve:\nhttps://algeria.blsspainvisa.com/\n\n⏰ ${new Date().toLocaleString('fr-DZ')}`);
+        const hasTimeSlots = lower.includes('8:30 am') || lower.includes('10:00 am') || lower.includes('heure de pointe');
+
+        console.log(`[${new Date().toISOString()}] Check: hasHighAvail=${hasHighAvail} hasTimeSlots=${hasTimeSlots} hasNoSlots=${hasNoSlots}`);
+
+        // Si on voit des créneaux dispo et pas de message "aucun créneau"
+        if ((hasHighAvail || hasTimeSlots) && !hasNoSlots) {
+            if (lastStatus !== 'available') {
+                await sendTelegram(`🚨 *CRENEAU BLS ALGER 1 DISPO !* 🚨\n\nCalendrier vert/jaune détecté comme sur ta photo !\n\nClique VITE : ${BLS_URL}\n\nNe remplis rien, clique direct sur la date verte !`);
+                lastStatus = 'available';
+            }
+            return 'available';
+        } else {
+            lastStatus = 'full';
+            return 'full';
+        }
+
+    } catch (e) {
+        console.log('Erreur check:', e.message);
+        // Si le browser crash, on le reset
+        if (browser) {
+            try { await browser.close(); } catch {}
+            browser = null;
+        }
+        return 'error';
+    } finally {
+        if (page) try { await page.close(); } catch {}
     }
-    lastStatus = isAvailable ? "available" : "no_slots";
-    
-    await browser.close();
-    return { status: lastStatus, available: isAvailable };
-  } catch (e) {
-    console.log("Erreur check:", e.message);
-    if (browser) try { await browser.close(); } catch {}
-    return { status: lastStatus, error: e.message };
-  }
 }
 
-// Check toutes les 3 minutes
+// Lance le check toutes les 3 minutes
 setInterval(checkBLS, 3 * 60 * 1000);
-checkBLS();
+checkBLS(); // premier check au démarrage
 
-app.get('/', (req, res) => res.send('BLS ALG1 V2 Puppeteer OK - @Blsalg1bot marche'));
-app.get('/api/slots', async (req, res) => {
-  const r = await checkBLS();
-  res.json({ ...r, checkedAt: new Date().toISOString() });
-});
+app.get('/', (req, res) => res.send(`BLS V3 Running - Status: ${lastStatus} - ${new Date().toISOString()}`));
+app.get('/health', (req, res) => res.send('OK'));
 app.get('/api/test-telegram', async (req, res) => {
-  await sendTelegram('✅ Test V2 OK - Ton bot Puppeteer BLS ALG1 est actif !');
-  res.json({ sent: true });
+    await sendTelegram('✅ Test V3 OK - Bot nouvelle interface opérationnel pour ALG1');
+    res.send('Test envoyé');
+});
+app.get('/api/check-now', async (req, res) => {
+    const status = await checkBLS();
+    res.send(`Status: ${status}`);
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log('V2 Running
+app.listen(PORT, () => console.log(`V3 Running on ${PORT}`));
